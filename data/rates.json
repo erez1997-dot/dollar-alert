@@ -1,7 +1,7 @@
 {
- "updatedAt": "2026-11-06T17:59:45.787Z",
+ "updatedAt": "2026-11-06T18:04:31.905Z",
  "source": "בנק ישראל · שער יציג",
- "thresholdPercent": 1,
+ "thresholdPercent": 3,
  "windowDays": 30,
  "latest": {
   "date": "2026-11-06",
@@ -13,7 +13,7 @@
  },
  "average": 3.1054,
  "diffPercent": 2.8537,
- "targetRate": 3.0743,
+ "targetRate": 3.0122,
  "isGoodTime": false,
  "lastAlertedDate": null,
  "series": [
