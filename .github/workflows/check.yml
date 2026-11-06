@@ -1,0 +1,42 @@
+name: Dollar rate check
+
+on:
+  schedule:
+    # Bank of Israel publishes the representative rate around 15:30 Israel time
+    - cron: '0 14 * * *'
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Send a test message to Telegram'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency: rate-check
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check rate and alert
+        run: node scripts/check.mjs ${{ inputs.test && '--test' || '' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+
+      - name: Save data for the app
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/rates.json
+          git diff --cached --quiet || (git commit -m "Update rate data" && git push)
