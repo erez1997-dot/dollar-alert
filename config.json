@@ -1,4 +1,6 @@
 {
+  "targetRate": 3.02,
+  "approachMargin": 0.05,
   "thresholdPercent": 3.0,
   "windowDays": 30
 }

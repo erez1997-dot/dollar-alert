@@ -151,9 +151,9 @@ button {
 }
 .status h2 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
 .status p { margin: 10px 0 0; color: var(--text-2); font-size: 15px; text-wrap: pretty; }
-.status[data-state="good"] .status-icon { background: var(--good-soft); color: var(--good); }
-.status[data-state="good"] h2 { color: var(--good); }
-.status[data-state="high"] .status-icon { background: var(--high-soft); color: var(--high); }
+.status .status-sub { margin-top: 6px; font-size: 14px; color: var(--text-3); }
+.status[data-tone="good"] .status-icon { background: var(--good-soft); color: var(--good); }
+.status[data-tone="good"] h2 { color: var(--good); }
 
 .meter { margin-top: 18px; direction: ltr; }
 .meter-track {
@@ -167,6 +167,12 @@ button {
   inset-block: 0;
   left: 0;
   border-radius: 4px 0 0 4px;
+  background: var(--good);
+  opacity: 0.4;
+}
+.meter-near {
+  position: absolute;
+  inset-block: 0;
   background: var(--good-soft);
 }
 .meter-tick {
@@ -189,7 +195,7 @@ button {
   border: 3px solid var(--surface);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
-.status[data-state="good"] .meter-marker { background: var(--good); }
+.status[data-tone="good"] .meter-marker { background: var(--good); }
 /* Beyond the meter's ±4% the marker pins to the edge; an arrow says the value keeps going */
 .meter-marker[data-off]::after {
   content: "";
@@ -207,6 +213,7 @@ button {
   font-size: 12px;
   color: var(--text-3);
 }
+.meter-labels span { direction: rtl; unicode-bidi: isolate; } /* Hebrew labels inside the left-to-right meter */
 
 /* Chart */
 .chart-card { padding: 14px 0 12px; }
@@ -280,7 +287,7 @@ button {
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .key-line { width: 16px; height: 2px; border-radius: 1px; background: var(--text); }
 .key-dash { width: 16px; height: 0; border-top: 2px dashed var(--text-3); }
-.key-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+.key-target { width: 16px; height: 2px; border-radius: 1px; background: var(--good); }
 
 /* Info */
 .info { padding: 0; }
@@ -353,13 +360,15 @@ button {
       <h2 id="status-title"></h2>
     </div>
     <p id="status-text"></p>
+    <p class="status-sub" id="status-sub"></p>
     <div class="meter" aria-hidden="true">
       <div class="meter-track">
         <div class="meter-zone" id="meter-zone"></div>
-        <div class="meter-tick" style="left: 50%"></div>
+        <div class="meter-near" id="meter-near"></div>
+        <div class="meter-tick" id="meter-tick"></div>
         <div class="meter-marker" id="meter-marker"></div>
       </div>
-      <div class="meter-labels"><span>זול מהממוצע</span><span>ממוצע</span><span>יקר מהממוצע</span></div>
+      <div class="meter-labels"><span id="meter-target"></span><span>יקר יותר</span></div>
     </div>
   </section>
 
@@ -375,7 +384,7 @@ button {
     <div class="legend">
       <span><i class="key-line"></i>שער יציג</span>
       <span><i class="key-dash"></i><span id="legend-avg"></span></span>
-      <span><i class="key-dot"></i>ימים שהיו שולחים התראה</span>
+      <span><i class="key-target"></i><span id="legend-target"></span></span>
     </div>
   </section>
 
@@ -395,9 +404,9 @@ button {
   </section>
 </template>
 
-<script>
-const DAY_MS = 86_400_000;
-const MIN_OBSERVATIONS = 10;
+<script type="module">
+import { DAY_MS, rollingAverage } from './scripts/rules.mjs';
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const rtl = document.documentElement.dir === 'rtl';
@@ -409,34 +418,23 @@ const timeFmt = new Intl.DateTimeFormat('he-IL', { hour: '2-digit', minute: '2-d
 const $ = (id) => document.getElementById(id);
 const parseDay = (s) => new Date(s + 'T12:00:00');
 const rate3 = (r) => r.toFixed(3);
+const rate2 = (r) => r.toFixed(2);
+const agorot = (diff) => String(Number((Math.abs(diff) * 100).toFixed(1)));
 const pct = (p, digits = 1) => (p > 0 ? '+' : p < 0 ? '−' : '') + Math.abs(p).toFixed(digits) + '%';
 const num = (text) => `<span class="num">${text}</span>`;
 
+const arrowDown = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg>';
 const icons = {
-  good: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
-  neutral: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 12h12"/></svg>',
-  high: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
+  target: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  approach: arrowDown,
+  average: arrowDown,
+  away: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 12h12"/></svg>',
 };
 
 let data;
 let averages;
 let rangeDays = 91;
 let view; // what the chart currently shows, used by scrubbing
-
-// Same rule as scripts/check.mjs: average of the `days` calendar days before each date, the date itself excluded.
-function rollingAverage(points, days) {
-  const out = [];
-  let start = 0;
-  let sum = 0;
-  for (let i = 0; i < points.length; i++) {
-    if (i > 0) sum += points[i - 1][1];
-    const from = Date.parse(points[i][0]) - days * DAY_MS;
-    while (start < i && Date.parse(points[start][0]) < from) sum -= points[start++][1];
-    const count = i - start;
-    out.push(count >= MIN_OBSERVATIONS ? sum / count : null);
-  }
-  return out;
-}
 
 // Dev only: ?data=good|worst|edge|error loads a stress-test fixture from dev/fixtures (see dev/make-fixtures.mjs)
 const DEV = ['localhost', '127.0.0.1'].includes(location.hostname);
@@ -450,7 +448,7 @@ async function load() {
 }
 
 function renderSummary() {
-  const { latest, previous, average, diffPercent, targetRate, thresholdPercent, windowDays } = data;
+  const { latest, previous, average, diffPercent, targetRate, approachRate, approachMargin, priceLevel, belowAverage, thresholdPercent, windowDays } = data;
   const updated = new Date(data.updatedAt);
   const sameDay = updated.toDateString() === new Date().toDateString();
   $('updated').textContent = sameDay ? `עודכן היום ב-${timeFmt.format(updated)}` : `עודכן ${dayLong.format(updated)}`;
@@ -477,34 +475,54 @@ function renderSummary() {
     ? 'ללא שינוי מיום המסחר הקודם'
     : `${num((delta > 0 ? '+' : '−') + Math.abs(delta).toFixed(3))} (${num(pct(deltaPct, 2))}) מיום המסחר הקודם`;
 
-  const state = diffPercent <= -thresholdPercent ? 'good' : diffPercent >= thresholdPercent ? 'high' : 'neutral';
+  // The target price the user set leads; the average rule is the secondary signal
+  const state = priceLevel === 2 ? 'target' : priceLevel === 1 ? 'approach' : belowAverage ? 'average' : 'away';
+  const target = `${num(rate2(targetRate))} ₪`;
+  const titles = {
+    target: 'הדולר הגיע ליעד שלך',
+    approach: 'הדולר מתקרב ליעד',
+    average: 'הדולר נמוך מהממוצע',
+    away: `עוד ${agorot(latest.rate - targetRate)} אגורות ליעד`,
+  };
+  const toTarget = priceLevel === 2
+    ? `השער הגיע ליעד שקבעת, ${target}.`
+    : `השער ${num(agorot(latest.rate - targetRate))} אגורות מעל היעד שקבעת, ${target}.`;
+  const nextAlert = priceLevel === 0
+    ? ` התראה ראשונה תישלח ב-${num(rate2(approachRate))} ₪.`
+    : priceLevel === 1 ? ' התראה נוספת תישלח כשהשער יגיע ליעד.' : '';
+  const sent = priceLevel > 0 ? data.alertedLevel >= priceLevel : belowAverage && data.lastAlertedDate === latest.date;
+  const alertNote = data.alertMissed
+    ? ' ההתראה בטלגרם לא נשלחה, בדוק שהבוט מוגדר ב-GitHub.'
+    : sent ? ' שלחנו לך התראה בטלגרם.' : '';
   const direction = diffPercent < 0 ? 'נמוך' : 'גבוה';
-  const vsAverage = `${direction} ב-${num(Math.abs(diffPercent).toFixed(1) + '%')} מהממוצע של ${windowDays} הימים האחרונים (${num(rate3(average))} ₪)`;
-  const titles = { good: 'זמן טוב לקנות', neutral: 'השער בטווח הרגיל', high: 'הדולר יקר מהרגיל' };
-  $('status').dataset.state = state;
+  $('status').dataset.tone = state === 'away' ? 'neutral' : 'good';
   $('status-icon').innerHTML = icons[state];
   $('status-title').textContent = titles[state];
-  const alerted = data.lastAlertedDate === latest.date;
-  $('status-text').innerHTML = state !== 'good'
-    ? `השער ${vsAverage}. התראה תישלח כשהוא יירד מתחת ל-${num(rate3(targetRate))} ₪.`
-    : alerted
-      ? `השער ${vsAverage}. שלחנו לך התראה בטלגרם.`
-      : `השער ${vsAverage}. ההתראה בטלגרם לא נשלחה, בדוק שהבוט מוגדר ב-GitHub.`;
+  $('status-text').innerHTML = toTarget + nextAlert + alertNote;
+  $('status-sub').innerHTML =
+    `ביחס לממוצע של ${windowDays} יום (${num(rate3(average))} ₪) השער ${direction} ב-${num(Math.abs(diffPercent).toFixed(1) + '%')}.`;
 
-  // Meter spans ±4% around the average, cheaper on the left
-  const SPAN = 4;
-  const pos = (p) => ((Math.max(-SPAN, Math.min(SPAN, p)) + SPAN) / (2 * SPAN)) * 100;
-  $('meter-zone').style.width = pos(-thresholdPercent) + '%';
-  $('meter-marker').style.left = pos(diffPercent) + '%';
-  if (Math.abs(diffPercent) > SPAN) $('meter-marker').dataset.off = diffPercent < 0 ? 'low' : 'high';
+  // Meter runs from just under the target (left, cheaper) to above today's rate
+  const lo = targetRate - approachMargin;
+  const hi = Math.max(targetRate + 6 * approachMargin, latest.rate + approachMargin);
+  const pos = (r) => ((Math.min(hi, Math.max(lo, r)) - lo) / (hi - lo)) * 100;
+  $('meter-zone').style.width = pos(targetRate) + '%';
+  $('meter-near').style.left = pos(targetRate) + '%';
+  $('meter-near').style.width = pos(approachRate) - pos(targetRate) + '%';
+  $('meter-tick').style.left = pos(targetRate) + '%';
+  $('meter-marker').style.left = pos(latest.rate) + '%';
+  if (latest.rate < lo) $('meter-marker').dataset.off = 'low';
   else delete $('meter-marker').dataset.off;
+  $('meter-target').innerHTML = `יעד ${target}`;
 
   $('legend-avg').textContent = `ממוצע ${windowDays} יום`;
+  $('legend-target').innerHTML = `יעד ${target}`;
   $('how').innerHTML = [
     'פעמיים ביום מתבצעת בדיקה אוטומטית של השער היציג שמפרסם בנק ישראל.',
-    `השער משווה לממוצע של ${windowDays} הימים שלפני.`,
-    `אם השער נמוך מהממוצע ב-${num(thresholdPercent + '%')} לפחות, נשלחת אליך הודעה בטלגרם, פעם אחת לכל יום מסחר.`,
-    'הנקודות הירוקות בגרף מראות ימים בעבר שבהם הכלל הזה התקיים.',
+    `כשהשער יורד ל-${num(rate2(approachRate))} ₪ או פחות, נשלחת התראה "מתקרב ליעד". כשהוא מגיע ל-${target} או פחות, נשלחת התראה "הגיע ליעד".`,
+    'כל התראה נשלחת פעם אחת. אם השער עולה בחזרה מעל הרמה, היא תישלח שוב בפעם הבאה שהוא יורד אליה.',
+    `בנוסף, נשלחת התראה כשהשער נמוך ב-${num(thresholdPercent + '%')} לפחות מהממוצע של ${windowDays} הימים שלפני (הקו המקווקו בגרף).`,
+    'את היעד ואת הכללים אפשר לשנות בקובץ config.json במאגר.',
     'בבנק או בצ׳יינג׳ תקבל שער קצת שונה מהשער היציג, בגלל העמלה והמרווח.',
   ].map((t) => `<li>${t}</li>`).join('');
 }
@@ -540,9 +558,9 @@ function drawChart() {
   const first = data.series.findIndex(([d]) => parseDay(d).getTime() >= lastDay - rangeDays * DAY_MS);
   const points = data.series.slice(first);
   const avgs = averages.slice(first);
-  const threshold = 1 - data.thresholdPercent / 100;
 
-  const values = points.map((p) => p[1]).concat(avgs.filter((a) => a !== null));
+  // The target line is always in view, so it is part of the y range
+  const values = points.map((p) => p[1]).concat(avgs.filter((a) => a !== null), data.targetRate);
   let min = Math.min(...values);
   let max = Math.max(...values);
   const pad = (max - min) * 0.12 || 0.01;
@@ -578,6 +596,10 @@ function drawChart() {
     svg.append(label);
   }
 
+  svg.append(el('line', {
+    x1: 0, x2: plotW, y1: y(data.targetRate), y2: y(data.targetRate), stroke: good, 'stroke-width': 1.5,
+  }));
+
   const avgPath = avgs
     .map((a, i) => (a === null ? null : `${x(i).toFixed(1)},${y(a).toFixed(1)}`))
     .filter(Boolean);
@@ -591,12 +613,6 @@ function drawChart() {
     points: points.map((p, i) => `${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' '),
     fill: 'none', stroke: text, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
   }));
-
-  points.forEach((p, i) => {
-    if (avgs[i] !== null && p[1] <= avgs[i] * threshold) {
-      svg.append(el('circle', { cx: x(i), cy: y(p[1]), r: 3.5, fill: good }));
-    }
-  });
 
   const cursor = el('g', { visibility: 'hidden' });
   cursor.append(el('line', { x1: 0, x2: 0, y1: TOP - 6, y2: TOP + plotH, stroke: muted, 'stroke-width': 1 }));
@@ -688,7 +704,7 @@ async function start() {
 function devToggle() {
   const bar = document.createElement('nav');
   bar.style.cssText = 'position:fixed;bottom:calc(env(safe-area-inset-bottom,0px) + 12px);left:50%;transform:translateX(-50%);display:flex;gap:2px;padding:2px;border-radius:9px;background:#d1d1d6;font:12px system-ui;direction:ltr;z-index:10';
-  for (const [key, label] of [[null, 'Demo'], ['good', 'Good'], ['worst', 'Worst case'], ['edge', 'Edge'], ['malformed', 'Bad data'], ['error', 'Error']]) {
+  for (const [key, label] of [[null, 'Demo'], ['target', 'Target'], ['near', 'Near'], ['worst', 'Worst'], ['edge', 'Edge'], ['malformed', 'Bad'], ['error', 'Error']]) {
     const a = document.createElement('a');
     a.textContent = label;
     a.href = key ? `?data=${key}` : './';

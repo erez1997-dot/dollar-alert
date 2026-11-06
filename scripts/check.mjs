@@ -1,54 +1,50 @@
 // Fetches the Bank of Israel USD/ILS representative rate, writes data/rates.json for the app,
-// and sends a Telegram alert when the latest rate is below the recent average by the configured threshold.
+// and sends a Telegram alert when the rate nears or reaches the target price, or drops well below its average.
 //
-//   node scripts/check.mjs           normal run (alerts once per new rate date)
+//   node scripts/check.mjs           normal run (each alert is sent once until the rate climbs back)
 //   node scripts/check.mjs --test    also sends a test message with the current status
 //   node scripts/check.mjs --dry     never sends anything
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { DAY_MS, MIN_OBSERVATIONS, dueAlerts, summarize } from './rules.mjs';
 
 const ROOT = new URL('../', import.meta.url);
 const DATA_DIR = new URL('data/', ROOT);
 const DATA_FILE = new URL('rates.json', DATA_DIR);
 const HISTORY_DAYS = 260; // enough for a 6-month chart plus the averaging window before it
-const MIN_OBSERVATIONS = 10;
-const DAY_MS = 86_400_000;
 
 const args = new Set(process.argv.slice(2));
 const config = JSON.parse(await readFile(new URL('config.json', ROOT), 'utf8'));
-const { thresholdPercent, windowDays } = config;
 
 const series = await fetchSeries();
 if (series.length < MIN_OBSERVATIONS + 1) throw new Error(`Only ${series.length} observations returned`);
 
-const averages = rollingAverage(series, windowDays);
-const last = series.length - 1;
-const latest = { date: series[last][0], rate: series[last][1] };
-const previous = { date: series[last - 1][0], rate: series[last - 1][1] };
-const average = averages[last];
-const diffPercent = ((latest.rate - average) / average) * 100;
-const targetRate = average * (1 - thresholdPercent / 100);
-const isGoodTime = latest.rate <= targetRate;
-
+const summary = summarize(series, config);
 const prior = await readPrior();
+const { reasons, alertedLevel: settledLevel } = dueAlerts(summary, prior);
+let alertedLevel = settledLevel;
 let lastAlertedDate = prior.lastAlertedDate ?? null;
+let alertMissed = false;
 
-const status = { latest, average, diffPercent, targetRate, isGoodTime };
+const { latest, average, diffPercent, targetRate, approachRate } = summary;
 console.log(
-  `${latest.date}: ${latest.rate.toFixed(3)} ILS, ${windowDays}-day average ${average.toFixed(3)}, ` +
-    `diff ${diffPercent.toFixed(2)}%, target ${targetRate.toFixed(3)}, good time: ${isGoodTime}`,
+  `${latest.date}: ${latest.rate.toFixed(3)} ILS, target ${targetRate} (early ${approachRate}), ` +
+    `${config.windowDays}-day average ${average.toFixed(3)} (${diffPercent.toFixed(2)}%), due: ${reasons.join(', ') || 'none'}`,
 );
 
 if (!args.has('--dry')) {
   if (args.has('--test')) {
-    if (!(await sendTelegram(testMessage(status)))) {
+    if (!(await sendTelegram(testMessage(summary)))) {
       throw new Error('Test message not sent: add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as repository secrets.');
     }
     console.log('Test message sent.');
   }
-  if (isGoodTime && latest.date !== lastAlertedDate) {
-    if (await sendTelegram(alertMessage(status))) {
-      lastAlertedDate = latest.date;
-      console.log('Alert sent.');
+  if (reasons.length) {
+    if (await sendTelegram(alertMessage(reasons, summary))) {
+      alertedLevel = summary.priceLevel;
+      if (reasons.includes('average')) lastAlertedDate = latest.date;
+      console.log(`Alert sent: ${reasons.join(', ')}`);
+    } else {
+      alertMissed = true;
     }
   }
 }
@@ -60,15 +56,13 @@ await writeFile(
     {
       updatedAt: new Date().toISOString(),
       source: 'בנק ישראל · שער יציג',
-      thresholdPercent,
-      windowDays,
-      latest,
-      previous,
+      ...summary,
       average: round(average),
       diffPercent: round(diffPercent),
-      targetRate: round(targetRate),
-      isGoodTime,
+      averageTargetRate: round(summary.averageTargetRate),
+      alertedLevel,
       lastAlertedDate,
+      alertMissed,
       series,
     },
     null,
@@ -108,22 +102,6 @@ function parseCsv(text) {
     .sort((a, b) => a[0].localeCompare(b[0]));
 }
 
-// Average of the observations in the `days` calendar days before each date (the date itself excluded).
-// The app has the same function so the chart matches the alert.
-function rollingAverage(points, days) {
-  const out = [];
-  let start = 0;
-  let sum = 0;
-  for (let i = 0; i < points.length; i++) {
-    if (i > 0) sum += points[i - 1][1];
-    const from = Date.parse(points[i][0]) - days * DAY_MS;
-    while (start < i && Date.parse(points[start][0]) < from) sum -= points[start++][1];
-    const count = i - start;
-    out.push(count >= MIN_OBSERVATIONS ? sum / count : null);
-  }
-  return out;
-}
-
 async function readPrior() {
   try {
     return JSON.parse(await readFile(DATA_FILE, 'utf8'));
@@ -148,25 +126,46 @@ async function sendTelegram(text) {
   return true;
 }
 
-function alertMessage({ latest, average, diffPercent }) {
+function agorot(rate) {
+  return String(Number((Math.abs(rate - targetRate) * 100).toFixed(1)));
+}
+
+function targetLine(rate) {
+  return rate <= targetRate
+    ? `השער הגיע ליעד שקבעת, ${targetRate.toFixed(2)} ₪.`
+    : `עוד ${agorot(rate)} אגורות ליעד שקבעת, ${targetRate.toFixed(2)} ₪.`;
+}
+
+function averageLine() {
+  const direction = diffPercent < 0 ? 'נמוך' : 'גבוה';
+  return `${direction} ב-${Math.abs(diffPercent).toFixed(1)}% מהממוצע של ${config.windowDays} הימים האחרונים (${average.toFixed(3)} ₪).`;
+}
+
+function alertMessage(due) {
+  const titles = {
+    target: '🎯 <b>הדולר הגיע ליעד שלך</b>',
+    approach: '👀 <b>הדולר מתקרב ליעד שלך</b>',
+    average: '📉 <b>הדולר נמוך מהממוצע</b>',
+  };
   return [
-    '💵 <b>זמן טוב לקנות דולר</b>',
+    titles[due[0]],
     '',
     `השער היציג היום: <b>${latest.rate.toFixed(3)} ₪</b>`,
-    `נמוך ב-${Math.abs(diffPercent).toFixed(1)}% מהממוצע של ${windowDays} הימים האחרונים (${average.toFixed(3)} ₪)`,
+    targetLine(latest.rate),
+    due.includes('average') ? averageLine() : '',
     appLink(),
     '',
     '<i>זה לא ייעוץ השקעות, ההחלטה שלך.</i>',
-  ].join('\n');
+  ].filter((line, i, all) => line !== '' || all[i - 1] !== '').join('\n');
 }
 
-function testMessage({ latest, average, diffPercent, targetRate, isGoodTime }) {
-  const direction = diffPercent < 0 ? 'נמוך' : 'גבוה';
+function testMessage() {
   return [
     '✅ <b>הודעת בדיקה: ההתראות עובדות</b>',
     '',
-    `השער היציג: ${latest.rate.toFixed(3)} ₪, ${direction} ב-${Math.abs(diffPercent).toFixed(1)}% מהממוצע (${average.toFixed(3)} ₪)`,
-    isGoodTime ? 'עכשיו זה זמן טוב לקנות.' : `התראה תישלח כשהשער יירד מתחת ל-${targetRate.toFixed(3)} ₪.`,
+    `השער היציג: ${latest.rate.toFixed(3)} ₪. ${targetLine(latest.rate)}`,
+    `התראה מוקדמת תישלח ב-${approachRate.toFixed(2)} ₪, והתראה נוספת ביעד.`,
+    `השער ${averageLine()}`,
     appLink(),
   ].join('\n');
 }
