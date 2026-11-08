@@ -1,5 +1,5 @@
 {
- "updatedAt": "2026-11-07T18:23:23.211Z",
+ "updatedAt": "2026-11-08T14:36:08.601Z",
  "source": "בנק ישראל · שער יציג",
  "targetRate": 3.02,
  "approachMargin": 0.05,
@@ -23,10 +23,6 @@
  "lastAlertedDate": null,
  "alertMissed": false,
  "series": [
-  [
-   "2026-02-20",
-   3.123
-  ],
   [
    "2026-02-23",
    3.123
